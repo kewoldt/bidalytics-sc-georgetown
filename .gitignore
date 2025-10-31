@@ -1,3 +1,5 @@
 .idea
 lambda_deployment.zip
 *.iml
+.claude/
+__pycache__/
