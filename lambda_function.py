@@ -435,17 +435,17 @@ def save_records_to_mongodb(foreclosure_records, auction_date):
         logger.error("MONGO_DB_URL environment variable not set")
         raise Exception('MONGO_DB_URL environment variable not set')
     
-    logger.info("Connecting to MongoDB")
-    client = MongoClient(
-        mongo_url, 
-        tls=True, 
-        tlsAllowInvalidCertificates=True,
-        serverSelectionTimeoutMS=5000,
-        connectTimeoutMS=5000,
-        socketTimeoutMS=5000
-    )
-    
+    client = None
     try:
+        logger.info("Connecting to MongoDB")
+        client = MongoClient(
+            mongo_url, 
+            tls=True, 
+            tlsAllowInvalidCertificates=True,
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=5000,
+            socketTimeoutMS=5000
+        )
         db = client.get_default_database()
         collection = db.auctionitems
         logger.info("Successfully connected to MongoDB")
@@ -498,7 +498,8 @@ def save_records_to_mongodb(foreclosure_records, auction_date):
                 logger.info(f"Successfully created case #{case_number}")
     
     finally:
-        client.close()
+        if client:
+            client.close()
         logger.info(f"MongoDB operations complete. Updated: {updated_count}, Created: {created_count}")
     
     return updated_count, created_count
