@@ -11,7 +11,7 @@ rm -f lambda_deployment.zip
 # Create package directory
 mkdir package
 
-# Install dependencies to package directory
+# Install runtime dependencies only (test deps live in requirements-dev.txt)
 pip3 install -r requirements.txt -t package/
 
 # Copy Lambda function to package
