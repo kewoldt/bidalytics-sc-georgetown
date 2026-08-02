@@ -47,7 +47,7 @@ Georgetown County website → fetch_and_parse_webpage()
 | Variable | Purpose |
 |----------|---------|
 | `MONGO_DB_URL` | MongoDB Atlas connection string |
-| `MODEL_ID` | Bedrock model ARN (defaults to `anthropic.claude-3-7-sonnet-20250514-v1:0`) |
+| `MODEL_ID` | **Required** — Bedrock model / inference-profile ARN (set in Lambda console; no default in source) |
 | `COUNTY_URL` | Georgetown County foreclosure page URL |
 
 ## Deployment

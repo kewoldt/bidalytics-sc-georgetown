@@ -8,7 +8,7 @@ This Lambda function:
 1. Fetches the Georgetown County foreclosure sales webpage
 2. Extracts the PDF link for the most recent auction month (current or future)
 3. Downloads and validates PDF files (rejects non-PDF formats like XLS)
-4. Uses AWS Bedrock (Claude Sonnet) to parse foreclosure data from PDFs
+4. Uses AWS Bedrock (Claude) to parse foreclosure data from PDFs
 5. Calculates proper auction dates with federal holiday handling
 6. Saves/updates records in MongoDB with duplicate prevention
 
@@ -33,7 +33,7 @@ Georgetown County Website → Lambda Function → AWS Bedrock → MongoDB
 
 ### AWS Services
 - **AWS Lambda**: Python 3.14 runtime
-- **AWS Bedrock**: Claude Sonnet 4.5 model access
+- **AWS Bedrock**: access to the Claude model configured via `MODEL_ID`
 - **IAM Role**: With permissions for Bedrock and CloudWatch Logs
 - **VPC/NAT Gateway**: For static IP if MongoDB requires IP whitelisting
 
@@ -64,7 +64,7 @@ Set these in AWS Lambda Configuration:
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `MONGO_DB_URL` | MongoDB connection string | `mongodb+srv://user:pass@cluster.mongodb.net/dbname` |
-| `MODEL_ID` | Bedrock model ARN (Claude Sonnet 4.5) | `arn:aws:bedrock:us-east-1::inference-profile/us.anthropic.claude-sonnet-4-5-20250929-v1:0` |
+| `MODEL_ID` | **Required.** Bedrock model / inference-profile ARN | `arn:aws:bedrock:<region>::inference-profile/<claude-model-id>` |
 | `COUNTY_URL` | County foreclosure page URL | |
 
 ### 3. IAM Permissions

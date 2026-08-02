@@ -447,7 +447,8 @@ class TestFetchAndParseWebpage(unittest.TestCase):
         self.assertEqual(
             pdf_url, 'https://www.gtcountysc.gov/DocumentCenter/View/4200'
         )
-        self.assertEqual(month_date, datetime(2026, 10, 1))
+        # 2nd element is the month label string, consistent with the skip path.
+        self.assertEqual(month_date, 'October 2026')
         # First Monday of October 2026 is the 5th; not one of the 3 holidays.
         self.assertEqual(auction_date.date(), datetime(2026, 10, 5).date())
 
@@ -477,7 +478,8 @@ class TestFetchAndParseWebpage(unittest.TestCase):
         self.assertEqual(
             pdf_url, 'https://www.gtcountysc.gov/DocumentCenter/View/4145'
         )
-        self.assertEqual(month_date, datetime(2026, 8, 1))
+        # 2nd element is the month label string, consistent with the skip path.
+        self.assertEqual(month_date, 'August 2026')
         # First Monday of August 2026 is the 3rd; not a holiday.
         self.assertEqual(auction_date.date(), datetime(2026, 8, 3).date())
 

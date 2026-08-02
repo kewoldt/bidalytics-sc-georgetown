@@ -129,8 +129,13 @@ def fetch_and_parse_webpage(session, main_url):
         main_url: URL of the county foreclosure page
         
     Returns:
-        tuple: (pdf_url, auction_month_date, calculated_auction_date)
-        
+        tuple: (pdf_url, month_label, calculated_auction_date)
+            - Normal path: (str pdf_url, str month_label e.g. 'August 2026', datetime auction_date)
+            - Skip path (most recent link is a strictly-past month):
+              (None, str link_text, None) — pdf_url is None to signal the caller to skip.
+        In both paths the 2nd element is a human-readable month/label string, so the
+        caller can safely serialize it.
+
     Raises:
         Exception: If webpage cannot be fetched or parsed
     """
@@ -247,7 +252,9 @@ def fetch_and_parse_webpage(session, main_url):
     pdf_url = urljoin(response.url, pdf_href)
     logger.info(f"Step 3: Constructed PDF URL: {pdf_url}")
     
-    return pdf_url, auction_month_date, calculated_auction_date
+    # Return the month label as a string (2nd element) so the contract is
+    # consistent with the skip path; auction_month_date stays internal.
+    return pdf_url, link_text, calculated_auction_date
 
 
 def download_and_validate_pdf(session, pdf_url):
@@ -436,7 +443,11 @@ Rules:
     }
     
     # Step 7: Call Bedrock API
-    model_id = os.environ.get('MODEL_ID', 'anthropic.claude-3-7-sonnet-20250514-v1:0')
+    # MODEL_ID is required and configured in the Lambda console (kept out of
+    # source so the model choice isn't published in this public repo).
+    model_id = os.environ.get('MODEL_ID')
+    if not model_id:
+        raise ValueError("MODEL_ID environment variable is required (Bedrock model / inference-profile ARN)")
     logger.info(f"Step 7: Calling Bedrock API with model: {model_id}")
     response = bedrock.invoke_model(
         modelId=model_id,
@@ -576,15 +587,22 @@ def lambda_handler(event, context):
     
     try:
         logger.info("Starting foreclosure processing")
-        
+
+        # Validate required configuration up front so we fail fast before doing
+        # any network work. These are set in the Lambda console, not in source.
+        if not os.environ.get('MODEL_ID'):
+            raise ValueError("MODEL_ID environment variable is required (Bedrock model / inference-profile ARN)")
+        main_url = os.environ.get('COUNTY_URL')
+        if not main_url:
+            raise ValueError("COUNTY_URL environment variable is required")
+
         # Create session with retry logic and proper headers
         session = create_session_with_retries()
-        main_url = os.environ.get('COUNTY_URL')
         
         # Step 1-3: Fetch and parse webpage to get PDF URL
         pdf_url, auction_month_info, auction_date = fetch_and_parse_webpage(session, main_url)
         
-        # Check if we should skip processing (current/past month)
+        # Check if we should skip processing (most recent link is a strictly-past month)
         if pdf_url is None:
             return {
                 'statusCode': 200,
