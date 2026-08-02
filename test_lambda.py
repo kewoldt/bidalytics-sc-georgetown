@@ -27,6 +27,7 @@ from lambda_function import (
     get_next_business_day,
     get_auction_date,
     fetch_and_parse_webpage,
+    strip_json_fence,
 )
 
 
@@ -544,6 +545,32 @@ class TestFetchAndParseWebpage(unittest.TestCase):
         )
         # First Monday of the current month (Aug 2026) is the 3rd.
         self.assertEqual(auction_date.date(), datetime(2026, 8, 3).date())
+
+
+class TestStripJsonFence(unittest.TestCase):
+    """Tests for stripping markdown code fences from Bedrock JSON output."""
+
+    def test_fenced_json_array(self):
+        raw = '```json\n[\n  {"caseNumber": "2026-166"}\n]\n```'
+        self.assertEqual(
+            json.loads(strip_json_fence(raw)),
+            [{"caseNumber": "2026-166"}],
+        )
+
+    def test_bare_json_array(self):
+        raw = '[{"caseNumber": "2026-139"}]'
+        self.assertEqual(
+            json.loads(strip_json_fence(raw)),
+            [{"caseNumber": "2026-139"}],
+        )
+
+    def test_fence_without_language_tag(self):
+        raw = '```\n[{"a": 1}]\n```'
+        self.assertEqual(json.loads(strip_json_fence(raw)), [{"a": 1}])
+
+    def test_prose_around_json(self):
+        raw = 'Here are the records:\n[{"a": 1}]\nThanks!'
+        self.assertEqual(json.loads(strip_json_fence(raw)), [{"a": 1}])
 
 
 if __name__ == '__main__':

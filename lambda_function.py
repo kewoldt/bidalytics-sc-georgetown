@@ -321,6 +321,42 @@ def download_and_validate_pdf(session, pdf_url):
     return pdf_response.content
 
 
+def strip_json_fence(text):
+    """
+    Remove a surrounding markdown code fence from model output and isolate the
+    JSON payload.
+
+    Claude sometimes returns the JSON wrapped like:
+        ```json
+        [ ... ]
+        ```
+    which is not valid JSON on its own. This strips the fence (with or without a
+    language tag) and, as a fallback, trims to the outermost JSON array/object so
+    any leading/trailing prose does not break json.loads().
+    """
+    cleaned = text.strip()
+
+    if cleaned.startswith("```"):
+        # Drop the opening fence line (e.g. "```json" or "```") and closing fence.
+        lines = cleaned.split("\n")
+        lines = lines[1:]  # remove opening ``` line
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        cleaned = "\n".join(lines).strip()
+
+    # Fallback: isolate the outermost array or object if any stray text remains.
+    start = min(
+        (i for i in (cleaned.find("["), cleaned.find("{")) if i != -1),
+        default=-1,
+    )
+    if start != -1:
+        end = max(cleaned.rfind("]"), cleaned.rfind("}"))
+        if end > start:
+            cleaned = cleaned[start:end + 1]
+
+    return cleaned
+
+
 def process_pdf_with_bedrock(pdf_content, auction_date):
     """
     Process PDF content with AWS Bedrock to extract foreclosure data.
@@ -387,6 +423,14 @@ Rules:
                         "text": prompt
                     }
                 ]
+            },
+            {
+                # Prefill the assistant turn with the opening bracket so the model
+                # continues mid-array and cannot emit a leading ```json fence.
+                # The returned text is everything AFTER this "[", so we prepend it
+                # back before parsing.
+                "role": "assistant",
+                "content": "["
             }
         ]
     }
@@ -404,9 +448,15 @@ Rules:
     # Step 8: Parse response
     logger.info("Step 8: Parsing Bedrock response")
     response_body = json.loads(response['body'].read())
-    parsed_data = response_body['content'][0]['text']
+    # We prefilled the assistant turn with "[", so the returned text is the rest
+    # of the array. Prepend the bracket back to reconstruct the full JSON.
+    parsed_data = "[" + response_body['content'][0]['text']
     logger.info(f"Received response from Bedrock, length: {len(parsed_data)} characters")
-    
+
+    # Defense in depth: even with the prefill, strip any stray markdown fence and
+    # isolate the JSON array/object before parsing.
+    parsed_data = strip_json_fence(parsed_data)
+
     try:
         foreclosure_records = json.loads(parsed_data)
         logger.info(f"Successfully parsed JSON, found {len(foreclosure_records)} foreclosure records")
