@@ -25,7 +25,8 @@ from lambda_function import (
     get_first_monday_of_month,
     is_federal_holiday,
     get_next_business_day,
-    get_auction_date
+    get_auction_date,
+    fetch_and_parse_webpage,
 )
 
 
@@ -358,19 +359,191 @@ class TestMonthFiltering(unittest.TestCase):
             current_date = mock_datetime.now()
             current_month_start = datetime(current_date.year, current_date.month, 1)
             
-            # Test cases: (link_text, should_process)
+            # Test cases: (link_text, should_process). The current month is
+            # treated as upcoming — only strictly-past months are skipped.
             test_cases = [
                 ("December 2024", False),  # Past month
-                ("January 2025", False),   # Current month
+                ("January 2025", True),    # Current month — processed
                 ("February 2025", True),   # Future month
                 ("March 2025", True),      # Future month
             ]
-            
+
             for link_text, should_process in test_cases:
                 auction_month_date = datetime.strptime(link_text, '%B %Y')
-                is_future = auction_month_date > current_month_start
-                self.assertEqual(is_future, should_process, 
+                is_upcoming = auction_month_date >= current_month_start
+                self.assertEqual(is_upcoming, should_process,
                                f"Month filtering failed for {link_text}")
+
+
+def _make_response(html, final_url):
+    """Build a fake requests.Response-like object for a fetched page."""
+    response = MagicMock()
+    response.content = html.encode('utf-8')
+    response.url = final_url            # final URL after any redirects
+    response.status_code = 200
+    response.raise_for_status.return_value = None
+    return response
+
+
+def _page_html(items):
+    """
+    Build HTML matching the live Georgetown County page structure:
+    an <h2>Upcoming Foreclosure Sales</h2> followed by a sibling <ul> of
+    <li><a href=...>Month Year</a></li> entries (newest first).
+
+    `items` is a list of (link_text, href) tuples.
+    """
+    lis = "\n".join(
+        f'<li><a href="{href}">{text}</a></li>' for text, href in items
+    )
+    return f"""
+    <html><body>
+      <div class="widget">
+        <h2>Bidding on Foreclosures</h2>
+        <p>Some intro text.</p>
+        <h2>Upcoming Foreclosure Sales</h2>
+        <ul>
+          {lis}
+        </ul>
+      </div>
+    </body></html>
+    """
+
+
+class TestFetchAndParseWebpage(unittest.TestCase):
+    """
+    End-to-end tests for fetch_and_parse_webpage — the function that actually
+    scrapes the page and builds the PDF URL. These mirror the live page markup
+    (relative /DocumentCenter/View/<id> links under the "Upcoming Foreclosure
+    Sales" h2) rather than the hypothetical .fr-view markup in TestHTMLParsing.
+    """
+
+    def _run(self, html, final_url, now):
+        """Invoke fetch_and_parse_webpage with a mocked session and clock."""
+        session = MagicMock()
+        session.get.return_value = _make_response(html, final_url)
+
+        with patch('lambda_function.datetime') as mock_dt:
+            mock_dt.now.return_value = now
+            mock_dt.strptime = datetime.strptime
+            # Allow real datetime(...) construction used by the date helpers.
+            mock_dt.side_effect = lambda *a, **k: datetime(*a, **k)
+            return fetch_and_parse_webpage(session, 'https://example.test/page')
+
+    def test_future_month_builds_pdf_url_on_redirected_domain(self):
+        """A future month yields a PDF URL resolved against the final page URL."""
+        html = _page_html([
+            ("October 2026", "/DocumentCenter/View/4200"),
+            ("August 2026", "/DocumentCenter/View/4145"),
+        ])
+        # COUNTY_URL pointed at the old domain but redirected to the new one;
+        # response.url reflects the new domain, so the PDF link must too.
+        pdf_url, month_date, auction_date = self._run(
+            html,
+            final_url='https://www.gtcountysc.gov/223/Foreclosure-Sales',
+            now=datetime(2026, 8, 2),
+        )
+        self.assertEqual(
+            pdf_url, 'https://www.gtcountysc.gov/DocumentCenter/View/4200'
+        )
+        self.assertEqual(month_date, datetime(2026, 10, 1))
+        # First Monday of October 2026 is the 5th; not one of the 3 holidays.
+        self.assertEqual(auction_date.date(), datetime(2026, 10, 5).date())
+
+    def test_absolute_href_is_preserved(self):
+        """An already-absolute href is returned unchanged."""
+        html = _page_html([
+            ("September 2026",
+             "https://cdn.example.gov/DocumentCenter/View/4200"),
+        ])
+        pdf_url, _, _ = self._run(
+            html,
+            final_url='https://www.gtcountysc.gov/223/Foreclosure-Sales',
+            now=datetime(2026, 8, 2),
+        )
+        self.assertEqual(
+            pdf_url, 'https://cdn.example.gov/DocumentCenter/View/4200'
+        )
+
+    def test_current_month_is_processed(self):
+        """The current month is processed — its sale (first Monday) may still be ahead."""
+        html = _page_html([("August 2026", "/DocumentCenter/View/4145")])
+        pdf_url, month_date, auction_date = self._run(
+            html,
+            final_url='https://www.gtcountysc.gov/223/Foreclosure-Sales',
+            now=datetime(2026, 8, 2),
+        )
+        self.assertEqual(
+            pdf_url, 'https://www.gtcountysc.gov/DocumentCenter/View/4145'
+        )
+        self.assertEqual(month_date, datetime(2026, 8, 1))
+        # First Monday of August 2026 is the 3rd; not a holiday.
+        self.assertEqual(auction_date.date(), datetime(2026, 8, 3).date())
+
+    def test_past_month_is_skipped(self):
+        """A past month is skipped."""
+        html = _page_html([("July 2026", "/DocumentCenter/View/4110")])
+        pdf_url, _, auction_date = self._run(
+            html,
+            final_url='https://www.gtcountysc.gov/223/Foreclosure-Sales',
+            now=datetime(2026, 8, 2),
+        )
+        self.assertIsNone(pdf_url)
+        self.assertIsNone(auction_date)
+
+    def test_holiday_month_bumps_auction_date(self):
+        """September's first Monday is Labor Day-adjacent; verify the bump.
+
+        For 2027, the first Monday of September falls on the 6th, which the
+        Labor-Day rule treats as a holiday and bumps to Tuesday the 7th.
+        """
+        html = _page_html([("September 2027", "/DocumentCenter/View/9999")])
+        _, _, auction_date = self._run(
+            html,
+            final_url='https://www.gtcountysc.gov/223/Foreclosure-Sales',
+            now=datetime(2026, 8, 2),
+        )
+        self.assertEqual(auction_date.date(), datetime(2027, 9, 7).date())
+
+    def test_missing_h2_raises(self):
+        html = "<html><body><ul><li><a href='/x'>August 2026</a></li></ul></body></html>"
+        session = MagicMock()
+        session.get.return_value = _make_response(
+            html, 'https://www.gtcountysc.gov/223/Foreclosure-Sales'
+        )
+        with self.assertRaises(Exception) as ctx:
+            fetch_and_parse_webpage(session, 'https://example.test/page')
+        self.assertIn('Upcoming Foreclosure Sales', str(ctx.exception))
+
+    def test_missing_link_raises(self):
+        html = """
+        <html><body>
+          <h2>Upcoming Foreclosure Sales</h2>
+          <ul><li>September 2026 (no link)</li></ul>
+        </body></html>
+        """
+        session = MagicMock()
+        session.get.return_value = _make_response(
+            html, 'https://www.gtcountysc.gov/223/Foreclosure-Sales'
+        )
+        with self.assertRaises(Exception) as ctx:
+            fetch_and_parse_webpage(session, 'https://example.test/page')
+        self.assertIn('link', str(ctx.exception).lower())
+
+    def test_unparseable_month_falls_back_to_current_month(self):
+        """Non-'Month Year' link text falls back to current-month auction date."""
+        html = _page_html([("Latest Sales", "/DocumentCenter/View/4145")])
+        pdf_url, month_date, auction_date = self._run(
+            html,
+            final_url='https://www.gtcountysc.gov/223/Foreclosure-Sales',
+            now=datetime(2026, 8, 2),
+        )
+        # Fallback still produces a PDF URL (does not skip).
+        self.assertEqual(
+            pdf_url, 'https://www.gtcountysc.gov/DocumentCenter/View/4145'
+        )
+        # First Monday of the current month (Aug 2026) is the 3rd.
+        self.assertEqual(auction_date.date(), datetime(2026, 8, 3).date())
 
 
 if __name__ == '__main__':

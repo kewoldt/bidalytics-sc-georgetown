@@ -24,6 +24,7 @@ import os
 import logging
 import time
 from datetime import datetime, timedelta
+from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from botocore.exceptions import ClientError
 from pymongo import MongoClient
@@ -216,8 +217,11 @@ def fetch_and_parse_webpage(session, main_url):
         
         logger.info(f"Link month: {auction_month_date.strftime('%B %Y')}, Current month: {current_month_start.strftime('%B %Y')}")
         
-        if auction_month_date <= current_month_start:
-            logger.info(f"Ending job. The most recent PDF link is: '{link_text}', Current month: '{current_month_start.strftime('%B %Y')}'")
+        # Process the current month as well as future months: the current
+        # month's sale is the first Monday, which is often still ahead when the
+        # Lambda runs early in the month. Only strictly-past months are skipped.
+        if auction_month_date < current_month_start:
+            logger.info(f"Ending job. The most recent PDF link is a past month: '{link_text}', Current month: '{current_month_start.strftime('%B %Y')}'")
             return None, link_text, None  # Signal to skip processing
         
         # Update auction_date to use the calculated date for this month
@@ -233,12 +237,14 @@ def fetch_and_parse_webpage(session, main_url):
         auction_month_date = now
         logger.info(f"Using fallback auction date: {calculated_auction_date.strftime('%Y-%m-%d')}")
 
-    # Step 3: Construct PDF URL
+    # Step 3: Construct PDF URL.
+    # Resolve the (usually relative) href against the final URL of the page we
+    # actually fetched (response.url follows any redirects). This keeps the PDF
+    # link on the county's current domain even if COUNTY_URL points at an old one
+    # that 301-redirects — hard-coding the domain here previously sent the PDF
+    # download to a dead host and caused connect timeouts.
     pdf_href = first_link['href']
-    if pdf_href.startswith('/'):
-        pdf_url = 'https://www.gt' + 'county.org' + pdf_href
-    else:
-        pdf_url = pdf_href
+    pdf_url = urljoin(response.url, pdf_href)
     logger.info(f"Step 3: Constructed PDF URL: {pdf_url}")
     
     return pdf_url, auction_month_date, calculated_auction_date
