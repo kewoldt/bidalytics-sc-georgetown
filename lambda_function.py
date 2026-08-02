@@ -24,6 +24,7 @@ import os
 import logging
 import time
 from datetime import datetime, timedelta
+from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from botocore.exceptions import ClientError
 from pymongo import MongoClient
@@ -128,8 +129,13 @@ def fetch_and_parse_webpage(session, main_url):
         main_url: URL of the county foreclosure page
         
     Returns:
-        tuple: (pdf_url, auction_month_date, calculated_auction_date)
-        
+        tuple: (pdf_url, month_label, calculated_auction_date)
+            - Normal path: (str pdf_url, str month_label e.g. 'August 2026', datetime auction_date)
+            - Skip path (most recent link is a strictly-past month):
+              (None, str link_text, None) — pdf_url is None to signal the caller to skip.
+        In both paths the 2nd element is a human-readable month/label string, so the
+        caller can safely serialize it.
+
     Raises:
         Exception: If webpage cannot be fetched or parsed
     """
@@ -216,8 +222,11 @@ def fetch_and_parse_webpage(session, main_url):
         
         logger.info(f"Link month: {auction_month_date.strftime('%B %Y')}, Current month: {current_month_start.strftime('%B %Y')}")
         
-        if auction_month_date <= current_month_start:
-            logger.info(f"Ending job. The most recent PDF link is: '{link_text}', Current month: '{current_month_start.strftime('%B %Y')}'")
+        # Process the current month as well as future months: the current
+        # month's sale is the first Monday, which is often still ahead when the
+        # Lambda runs early in the month. Only strictly-past months are skipped.
+        if auction_month_date < current_month_start:
+            logger.info(f"Ending job. The most recent PDF link is a past month: '{link_text}', Current month: '{current_month_start.strftime('%B %Y')}'")
             return None, link_text, None  # Signal to skip processing
         
         # Update auction_date to use the calculated date for this month
@@ -233,15 +242,19 @@ def fetch_and_parse_webpage(session, main_url):
         auction_month_date = now
         logger.info(f"Using fallback auction date: {calculated_auction_date.strftime('%Y-%m-%d')}")
 
-    # Step 3: Construct PDF URL
+    # Step 3: Construct PDF URL.
+    # Resolve the (usually relative) href against the final URL of the page we
+    # actually fetched (response.url follows any redirects). This keeps the PDF
+    # link on the county's current domain even if COUNTY_URL points at an old one
+    # that 301-redirects — hard-coding the domain here previously sent the PDF
+    # download to a dead host and caused connect timeouts.
     pdf_href = first_link['href']
-    if pdf_href.startswith('/'):
-        pdf_url = 'https://www.gt' + 'county.org' + pdf_href
-    else:
-        pdf_url = pdf_href
+    pdf_url = urljoin(response.url, pdf_href)
     logger.info(f"Step 3: Constructed PDF URL: {pdf_url}")
     
-    return pdf_url, auction_month_date, calculated_auction_date
+    # Return the month label as a string (2nd element) so the contract is
+    # consistent with the skip path; auction_month_date stays internal.
+    return pdf_url, link_text, calculated_auction_date
 
 
 def download_and_validate_pdf(session, pdf_url):
@@ -315,6 +328,42 @@ def download_and_validate_pdf(session, pdf_url):
     return pdf_response.content
 
 
+def strip_json_fence(text):
+    """
+    Remove a surrounding markdown code fence from model output and isolate the
+    JSON payload.
+
+    Claude sometimes returns the JSON wrapped like:
+        ```json
+        [ ... ]
+        ```
+    which is not valid JSON on its own. This strips the fence (with or without a
+    language tag) and, as a fallback, trims to the outermost JSON array/object so
+    any leading/trailing prose does not break json.loads().
+    """
+    cleaned = text.strip()
+
+    if cleaned.startswith("```"):
+        # Drop the opening fence line (e.g. "```json" or "```") and closing fence.
+        lines = cleaned.split("\n")
+        lines = lines[1:]  # remove opening ``` line
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        cleaned = "\n".join(lines).strip()
+
+    # Fallback: isolate the outermost array or object if any stray text remains.
+    start = min(
+        (i for i in (cleaned.find("["), cleaned.find("{")) if i != -1),
+        default=-1,
+    )
+    if start != -1:
+        end = max(cleaned.rfind("]"), cleaned.rfind("}"))
+        if end > start:
+            cleaned = cleaned[start:end + 1]
+
+    return cleaned
+
+
 def process_pdf_with_bedrock(pdf_content, auction_date):
     """
     Process PDF content with AWS Bedrock to extract foreclosure data.
@@ -381,12 +430,24 @@ Rules:
                         "text": prompt
                     }
                 ]
+            },
+            {
+                # Prefill the assistant turn with the opening bracket so the model
+                # continues mid-array and cannot emit a leading ```json fence.
+                # The returned text is everything AFTER this "[", so we prepend it
+                # back before parsing.
+                "role": "assistant",
+                "content": "["
             }
         ]
     }
     
     # Step 7: Call Bedrock API
-    model_id = os.environ.get('MODEL_ID', 'anthropic.claude-3-7-sonnet-20250514-v1:0')
+    # MODEL_ID is required and configured in the Lambda console (kept out of
+    # source so the model choice isn't published in this public repo).
+    model_id = os.environ.get('MODEL_ID')
+    if not model_id:
+        raise ValueError("MODEL_ID environment variable is required (Bedrock model / inference-profile ARN)")
     logger.info(f"Step 7: Calling Bedrock API with model: {model_id}")
     response = bedrock.invoke_model(
         modelId=model_id,
@@ -398,9 +459,15 @@ Rules:
     # Step 8: Parse response
     logger.info("Step 8: Parsing Bedrock response")
     response_body = json.loads(response['body'].read())
-    parsed_data = response_body['content'][0]['text']
+    # We prefilled the assistant turn with "[", so the returned text is the rest
+    # of the array. Prepend the bracket back to reconstruct the full JSON.
+    parsed_data = "[" + response_body['content'][0]['text']
     logger.info(f"Received response from Bedrock, length: {len(parsed_data)} characters")
-    
+
+    # Defense in depth: even with the prefill, strip any stray markdown fence and
+    # isolate the JSON array/object before parsing.
+    parsed_data = strip_json_fence(parsed_data)
+
     try:
         foreclosure_records = json.loads(parsed_data)
         logger.info(f"Successfully parsed JSON, found {len(foreclosure_records)} foreclosure records")
@@ -520,15 +587,22 @@ def lambda_handler(event, context):
     
     try:
         logger.info("Starting foreclosure processing")
-        
+
+        # Validate required configuration up front so we fail fast before doing
+        # any network work. These are set in the Lambda console, not in source.
+        if not os.environ.get('MODEL_ID'):
+            raise ValueError("MODEL_ID environment variable is required (Bedrock model / inference-profile ARN)")
+        main_url = os.environ.get('COUNTY_URL')
+        if not main_url:
+            raise ValueError("COUNTY_URL environment variable is required")
+
         # Create session with retry logic and proper headers
         session = create_session_with_retries()
-        main_url = os.environ.get('COUNTY_URL')
         
         # Step 1-3: Fetch and parse webpage to get PDF URL
         pdf_url, auction_month_info, auction_date = fetch_and_parse_webpage(session, main_url)
         
-        # Check if we should skip processing (current/past month)
+        # Check if we should skip processing (most recent link is a strictly-past month)
         if pdf_url is None:
             return {
                 'statusCode': 200,

@@ -36,7 +36,7 @@ Georgetown County website → fetch_and_parse_webpage()
 ```
 
 **Key behaviors:**
-- Only processes **future** auction months — if the most recent PDF link is current month or past, the Lambda exits early with a 200.
+- Processes the **current and future** auction months — only if the most recent PDF link is a strictly-past month does the Lambda exit early with a 200. (The current month's sale is the first Monday, which is often still ahead when the Lambda runs early in the month.)
 - Auction date = first Monday of the month, bumped to next business day if it falls on New Year's Day, July 4th, or Labor Day.
 - `is_federal_holiday()` only covers three holidays — extend it there if more are needed.
 - MongoDB upsert key is `caseNumber`. New records get flags set (`attemptedGeoCodeApi`, `attemptedRentCastApi`, etc.) that the main bidalytics-service picks up for enrichment.
@@ -47,12 +47,12 @@ Georgetown County website → fetch_and_parse_webpage()
 | Variable | Purpose |
 |----------|---------|
 | `MONGO_DB_URL` | MongoDB Atlas connection string |
-| `MODEL_ID` | Bedrock model ARN (defaults to `anthropic.claude-3-7-sonnet-20250514-v1:0`) |
+| `MODEL_ID` | **Required** — Bedrock model / inference-profile ARN (set in Lambda console; no default in source) |
 | `COUNTY_URL` | Georgetown County foreclosure page URL |
 
 ## Deployment
 
-- Runtime: Python 3.13 (set in Lambda console)
+- Runtime: Python 3.14 (set in Lambda console)
 - Trigger: EventBridge cron `30 10 ? * WED *` (10:30 UTC every Wednesday)
 - Handler: `lambda_function.lambda_handler`
 - Timeout: 5+ minutes recommended

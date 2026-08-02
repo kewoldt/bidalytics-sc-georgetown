@@ -6,20 +6,20 @@ An AWS Lambda function that automatically processes Georgetown County foreclosur
 
 This Lambda function:
 1. Fetches the Georgetown County foreclosure sales webpage
-2. Extracts PDF links for future auction months only
+2. Extracts the PDF link for the most recent auction month (current or future)
 3. Downloads and validates PDF files (rejects non-PDF formats like XLS)
-4. Uses AWS Bedrock (Claude 3.5 Sonnet) to parse foreclosure data from PDFs
+4. Uses AWS Bedrock (Claude) to parse foreclosure data from PDFs
 5. Calculates proper auction dates with federal holiday handling
 6. Saves/updates records in MongoDB with duplicate prevention
 
 ## Features
 
-- **Smart Month Filtering**: Only processes future auction months, skips current/past
+- **Smart Month Filtering**: Processes the current and future auction months, skips strictly-past months
 - **File Type Validation**: Rejects non-PDF files (XLS, etc.) with clear error messages
 - **Federal Holiday Handling**: Automatically adjusts auction dates when first Monday conflicts with holidays
 - **MongoDB Integration**: Saves structured data with duplicate prevention by case number
 - **Comprehensive Logging**: Detailed CloudWatch logs for debugging and monitoring
-- **Unit Testing**: 17 test cases covering date calculations, HTML parsing, and file validation
+- **Unit Testing**: 25 test cases covering date calculations, webpage parsing, PDF-URL construction, and file validation
 
 ## Architecture
 
@@ -32,8 +32,8 @@ Georgetown County Website → Lambda Function → AWS Bedrock → MongoDB
 ## Requirements
 
 ### AWS Services
-- **AWS Lambda**: Python 3.9+ runtime
-- **AWS Bedrock**: Claude 3.5 Sonnet model access
+- **AWS Lambda**: Python 3.14 runtime
+- **AWS Bedrock**: access to the Claude model configured via `MODEL_ID`
 - **IAM Role**: With permissions for Bedrock and CloudWatch Logs
 - **VPC/NAT Gateway**: For static IP if MongoDB requires IP whitelisting
 
@@ -47,7 +47,7 @@ Georgetown County Website → Lambda Function → AWS Bedrock → MongoDB
 
 ```bash
 git clone <repository-url>
-cd auction-bedrock
+cd bidalytics-sc-georgetown
 
 # Install dependencies locally for testing (optional)
 pip3 install -r requirements.txt
@@ -64,7 +64,8 @@ Set these in AWS Lambda Configuration:
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `MONGO_DB_URL` | MongoDB connection string | `mongodb+srv://user:pass@cluster.mongodb.net/dbname` |
-| `MODEL_ID` | Bedrock model ARN | `arn:aws:bedrock:us-east-1::inference-profile/us.anthropic.claude-3-5-sonnet-20241022-v2:0` |
+| `MODEL_ID` | **Required.** Bedrock model / inference-profile ARN | `arn:aws:bedrock:<region>::inference-profile/<claude-model-id>` |
+| `COUNTY_URL` | County foreclosure page URL | |
 
 ### 3. IAM Permissions
 
@@ -150,6 +151,8 @@ python3 -m unittest test_lambda.py -v
 python3 -m unittest test_lambda.TestDateMethods -v
 python3 -m unittest test_lambda.TestFileTypeValidation -v
 python3 -m unittest test_lambda.TestHTMLParsing -v
+python3 -m unittest test_lambda.TestMonthFiltering -v
+python3 -m unittest test_lambda.TestFetchAndParseWebpage -v
 ```
 
 ## Scheduling
@@ -158,11 +161,11 @@ Set up EventBridge (CloudWatch Events) to trigger Lambda:
 - **Frequency**: Weekly or monthly
 - **Target**: Georgetown County updates their foreclosure PDFs regularly
 
-Example CloudWatch Events rule:
+Example EventBridge (CloudWatch Events) rule:
 ```json
 {
-  "ScheduleExpression": "cron(0 10 ? * MON *)",
-  "Description": "Run Georgetown foreclosure processing every Monday at 10 AM"
+  "ScheduleExpression": "cron(30 10 ? * WED *)",
+  "Description": "Run Georgetown foreclosure processing every Wednesday at 10:30 UTC"
 }
 ```
 
@@ -175,7 +178,8 @@ Common error scenarios:
 | MongoDB SSL handshake failed | IP not whitelisted | Add Lambda egress IPs to MongoDB Atlas |
 | Bedrock access denied | Missing permissions | Update IAM role |
 | File type not supported | XLS file instead of PDF | Check Georgetown County website format |
-| No .fr-view element found | Website structure changed | Update HTML parsing logic |
+| Could not find "Upcoming Foreclosure Sales" h2 / ul / li / link | Website structure changed | Update the selector chain in `fetch_and_parse_webpage()` |
+| Failed to fetch ... after N attempts (connect timeout) | `COUNTY_URL` points at an unreachable/old domain | Point `COUNTY_URL` at the county's current domain |
 
 ## Monitoring
 
@@ -195,7 +199,7 @@ Log messages include:
 
 ### File Structure
 ```
-auction-bedrock/
+bidalytics-sc-georgetown/
 ├── lambda_function.py      # Main Lambda handler
 ├── test_lambda.py         # Unit tests
 ├── requirements.txt       # Python dependencies  
