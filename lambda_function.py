@@ -555,8 +555,9 @@ def save_records_to_mongodb(foreclosure_records, auction_date):
                 record['auctionDate'] = auction_date
                 record['active'] = record.get('active', True)
                 record['isReopen'] = False
-                record['attemptedZillowApi'] = False
-                record['attemptedRentCastApi'] = False
+                record['attemptedRentCastValueApi'] = False
+                record['attemptedRentCastPropertiesApi'] = False
+                record['attemptedRentCastRentApi'] = False
                 record['attemptedGeoCodeApi'] = False
                 record['createDate'] = datetime.now()
                 

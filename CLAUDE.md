@@ -39,7 +39,7 @@ Georgetown County website → fetch_and_parse_webpage()
 - Processes the **current and future** auction months — only if the most recent PDF link is a strictly-past month does the Lambda exit early with a 200. (The current month's sale is the first Monday, which is often still ahead when the Lambda runs early in the month.)
 - Auction date = first Monday of the month, bumped to next business day if it falls on New Year's Day, July 4th, or Labor Day.
 - `is_federal_holiday()` only covers three holidays — extend it there if more are needed.
-- MongoDB upsert key is `caseNumber`. New records get flags set (`attemptedGeoCodeApi`, `attemptedRentCastApi`, etc.) that the main bidalytics-service picks up for enrichment.
+- MongoDB upsert key is `caseNumber`. New records get flags set (`attemptedGeoCodeApi`, `attemptedRentCastValueApi`, `attemptedRentCastPropertiesApi`, `attemptedRentCastRentApi`) that the main bidalytics-service picks up for enrichment. These must match the field names on `bidalytics-service/models/AuctionItem.ts` exactly — this repo writes to the `auctionitems` collection with raw `pymongo`, bypassing the Mongoose schema entirely, so a typo'd field name here fails silently (no validation error, just a dead field nobody reads).
 - `tlsAllowInvalidCertificates=True` is intentional for MongoDB Atlas compatibility.
 
 ## Environment Variables
