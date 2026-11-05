@@ -15,7 +15,8 @@
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 import json
-import boto3
+import anthropic
+from anthropic import AnthropicBedrock
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -26,7 +27,6 @@ import time
 from datetime import datetime, timedelta
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
-from botocore.exceptions import ClientError
 from pymongo import MongoClient
 
 # Configure logging
@@ -385,8 +385,12 @@ def process_pdf_with_bedrock(pdf_content, auction_date):
     
     # Step 6: Prepare Bedrock request with foreclosure parsing prompt
     logger.info("Step 6: Preparing Bedrock request")
-    bedrock = boto3.client('bedrock-runtime')
-    
+    # bedrock-runtime InvokeModel via the anthropic SDK. Region and credentials
+    # come from the Lambda environment (AWS_REGION + execution role). Current
+    # Claude models are only reachable here through inference-profile IDs
+    # (e.g. us./global.anthropic.claude-...), not on the bedrock-mantle endpoint.
+    bedrock = AnthropicBedrock()
+
     prompt = f"""You are a parser that extracts structured rows from a tabular foreclosure PDF.
 Rules:
 - Read the PDF and find the main table of sales.
@@ -410,62 +414,55 @@ Rules:
 - For the `auctionDate` attribute always set the value to '{auction_date}'.
 - Do NOT include any explanations or markdown—JSON only."""
 
-    request_body = {
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 4000,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "document",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "application/pdf",
-                            "data": pdf_base64
-                        }
-                    },
-                    {
-                        "type": "text",
-                        "text": prompt
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": pdf_base64
                     }
-                ]
-            },
-            {
-                # Prefill the assistant turn with the opening bracket so the model
-                # continues mid-array and cannot emit a leading ```json fence.
-                # The returned text is everything AFTER this "[", so we prepend it
-                # back before parsing.
-                "role": "assistant",
-                "content": "["
-            }
-        ]
-    }
-    
+                },
+                {
+                    "type": "text",
+                    "text": prompt
+                }
+            ]
+        }
+    ]
+
     # Step 7: Call Bedrock API
     # MODEL_ID is required and configured in the Lambda console (kept out of
     # source so the model choice isn't published in this public repo).
     model_id = os.environ.get('MODEL_ID')
     if not model_id:
-        raise ValueError("MODEL_ID environment variable is required (Bedrock model / inference-profile ARN)")
+        raise ValueError("MODEL_ID environment variable is required (Bedrock inference-profile ID, e.g. us.anthropic.claude-...)")
     logger.info(f"Step 7: Calling Bedrock API with model: {model_id}")
-    response = bedrock.invoke_model(
-        modelId=model_id,
-        body=json.dumps(request_body),
-        contentType='application/json'
+    response = bedrock.messages.create(
+        model=model_id,
+        max_tokens=16000,
+        # Table extraction doesn't need deep reasoning; low effort keeps
+        # thinking (on by default for current models) cheap and fast.
+        output_config={"effort": "low"},
+        messages=messages,
     )
-    logger.info(f"Bedrock API call successful, response status: {response['ResponseMetadata']['HTTPStatusCode']}")
-    
+    logger.info(f"Bedrock API call successful, stop_reason: {response.stop_reason}")
+
     # Step 8: Parse response
     logger.info("Step 8: Parsing Bedrock response")
-    response_body = json.loads(response['body'].read())
-    # We prefilled the assistant turn with "[", so the returned text is the rest
-    # of the array. Prepend the bracket back to reconstruct the full JSON.
-    parsed_data = "[" + response_body['content'][0]['text']
+    if response.stop_reason == "refusal":
+        raise Exception(f"Bedrock model declined the request: {response.stop_details}")
+    if response.stop_reason == "max_tokens":
+        logger.warning("Bedrock response hit max_tokens; output may be truncated")
+    # The response can start with a thinking block, so pick the text block by type.
+    parsed_data = next((block.text for block in response.content if block.type == "text"), "")
     logger.info(f"Received response from Bedrock, length: {len(parsed_data)} characters")
 
-    # Defense in depth: even with the prefill, strip any stray markdown fence and
-    # isolate the JSON array/object before parsing.
+    # Current models don't support assistant prefill, so strip any markdown
+    # fence and isolate the JSON array/object before parsing.
     parsed_data = strip_json_fence(parsed_data)
 
     try:
@@ -642,7 +639,7 @@ def lambda_handler(event, context):
                 'error': f'HTTP request error: {str(e)}'
             })
         }
-    except ClientError as e:
+    except anthropic.APIError as e:
         logger.error(f"AWS Bedrock error: {str(e)}")
         return {
             'statusCode': 500,

@@ -47,7 +47,7 @@ Georgetown County website → fetch_and_parse_webpage()
 | Variable | Purpose |
 |----------|---------|
 | `MONGO_DB_URL` | MongoDB Atlas connection string |
-| `MODEL_ID` | **Required** — Bedrock model / inference-profile ARN (set in Lambda console; no default in source) |
+| `MODEL_ID` | **Required** — Bedrock inference-profile ID, e.g. `us.anthropic.claude-sonnet-5-5` (set in Lambda console; no default in source) |
 | `COUNTY_URL` | Georgetown County foreclosure page URL |
 
 ## Deployment
@@ -58,7 +58,7 @@ Georgetown County website → fetch_and_parse_webpage()
 - Timeout: 5+ minutes recommended
 - Build: `./build_lambda.sh` → upload `lambda_deployment.zip` to Lambda console
 
-IAM role needs `bedrock:InvokeModel` on the inference profile ARN and standard CloudWatch Logs permissions.
+Bedrock is called through the `anthropic` SDK's `AnthropicBedrock` client (bedrock-runtime `InvokeModel`). Don't switch to `AnthropicBedrockMantle`: in commercial regions Sonnet 5.5 isn't served on the bedrock-mantle endpoint (404 "model does not exist"). Current models reject assistant prefill, so don't reintroduce one; `strip_json_fence()` handles fenced output. IAM role needs `bedrock:InvokeModel` on the inference profile and the foundation-model ARNs it routes to, plus standard CloudWatch Logs permissions.
 
 ## HTML Parsing Fragility
 
