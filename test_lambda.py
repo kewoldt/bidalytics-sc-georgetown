@@ -16,6 +16,7 @@
 
 import unittest
 from unittest.mock import patch, MagicMock
+from types import SimpleNamespace
 from datetime import datetime, timedelta
 import json
 from bs4 import BeautifulSoup
@@ -28,6 +29,7 @@ from lambda_function import (
     get_auction_date,
     fetch_and_parse_webpage,
     strip_json_fence,
+    process_pdf_with_bedrock,
 )
 
 
@@ -573,6 +575,71 @@ class TestStripJsonFence(unittest.TestCase):
     def test_prose_around_json(self):
         raw = 'Here are the records:\n[{"a": 1}]\nThanks!'
         self.assertEqual(json.loads(strip_json_fence(raw)), [{"a": 1}])
+
+
+@patch.dict('os.environ', {'MODEL_ID': 'us.anthropic.claude-sonnet-5-5'})
+@patch('lambda_function.AnthropicBedrock')
+class TestProcessPdfWithBedrock(unittest.TestCase):
+    """Tests for the Bedrock request and response handling, with the SDK client mocked."""
+
+    RECORDS = [{"caseNumber": "2026-166", "address": "1 Front St", "city": "Georgetown"}]
+
+    def _mock_response(self, mock_bedrock_cls, content, stop_reason="end_turn", stop_details=None):
+        response = SimpleNamespace(content=content, stop_reason=stop_reason, stop_details=stop_details)
+        create = mock_bedrock_cls.return_value.messages.create
+        create.return_value = response
+        return create
+
+    def _text_block(self, text):
+        return SimpleNamespace(type="text", text=text)
+
+    def test_request_has_no_assistant_prefill(self, mock_bedrock_cls):
+        create = self._mock_response(mock_bedrock_cls, [self._text_block(json.dumps(self.RECORDS))])
+
+        process_pdf_with_bedrock(b'%PDF-1.4 test', '2026-11-02')
+
+        kwargs = create.call_args.kwargs
+        self.assertEqual(kwargs['model'], 'us.anthropic.claude-sonnet-5-5')
+        self.assertEqual([m['role'] for m in kwargs['messages']], ['user'])
+
+    def test_thinking_block_then_fenced_json(self, mock_bedrock_cls):
+        fenced = '```json\n' + json.dumps(self.RECORDS) + '\n```'
+        self._mock_response(mock_bedrock_cls, [
+            SimpleNamespace(type="thinking", thinking="Reading the table..."),
+            self._text_block(fenced),
+        ])
+
+        result = process_pdf_with_bedrock(b'%PDF-1.4 test', '2026-11-02')
+
+        self.assertEqual(result, self.RECORDS)
+
+    def test_refusal_raises(self, mock_bedrock_cls):
+        self._mock_response(mock_bedrock_cls, [], stop_reason="refusal", stop_details={"type": "refusal"})
+
+        with self.assertRaises(Exception) as ctx:
+            process_pdf_with_bedrock(b'%PDF-1.4 test', '2026-11-02')
+        self.assertIn('declined', str(ctx.exception))
+
+    def test_max_tokens_with_complete_json_warns_and_returns(self, mock_bedrock_cls):
+        self._mock_response(mock_bedrock_cls, [self._text_block(json.dumps(self.RECORDS))], stop_reason="max_tokens")
+
+        with self.assertLogs(level='WARNING') as logs:
+            result = process_pdf_with_bedrock(b'%PDF-1.4 test', '2026-11-02')
+
+        self.assertEqual(result, self.RECORDS)
+        self.assertTrue(any('max_tokens' in line for line in logs.output))
+
+    def test_max_tokens_with_truncated_json_raises(self, mock_bedrock_cls):
+        self._mock_response(mock_bedrock_cls, [self._text_block('[{"caseNumber": "2026-166", "addr')], stop_reason="max_tokens")
+
+        with self.assertRaises(Exception) as ctx:
+            process_pdf_with_bedrock(b'%PDF-1.4 test', '2026-11-02')
+        self.assertIn('Failed to parse', str(ctx.exception))
+
+    def test_missing_model_id_raises(self, mock_bedrock_cls):
+        with patch.dict('os.environ', {'MODEL_ID': ''}):
+            with self.assertRaises(ValueError):
+                process_pdf_with_bedrock(b'%PDF-1.4 test', '2026-11-02')
 
 
 if __name__ == '__main__':

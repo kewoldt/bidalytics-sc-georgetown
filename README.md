@@ -64,7 +64,7 @@ Set these in AWS Lambda Configuration:
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `MONGO_DB_URL` | MongoDB connection string | `mongodb+srv://user:pass@cluster.mongodb.net/dbname` |
-| `MODEL_ID` | **Required.** Bedrock model / inference-profile ARN | `arn:aws:bedrock:<region>::inference-profile/<claude-model-id>` |
+| `MODEL_ID` | **Required.** Bedrock inference-profile ID (called via bedrock-runtime `InvokeModel`) | `us.anthropic.claude-sonnet-5-5` |
 | `COUNTY_URL` | County foreclosure page URL | |
 
 ### 3. IAM Permissions
@@ -80,7 +80,10 @@ Lambda execution role needs:
             "Action": [
                 "bedrock:InvokeModel"
             ],
-            "Resource": "arn:aws:bedrock:*:*:inference-profile/*"
+            "Resource": [
+                "arn:aws:bedrock:*:*:inference-profile/*",
+                "arn:aws:bedrock:*::foundation-model/*"
+            ]
         },
         {
             "Effect": "Allow",

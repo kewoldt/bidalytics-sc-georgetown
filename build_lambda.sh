@@ -14,12 +14,21 @@ mkdir package
 # Install runtime dependencies only (test deps live in requirements-dev.txt).
 # boto3/botocore are provided by the Lambda runtime, so exclude them from the
 # package to keep the zip small. They stay in requirements.txt for local dev.
-pip3 install -r <(grep -viE '^(boto3|botocore)([<>=!~ ]|$)' requirements.txt) -t package/
+# anthropic depends on compiled packages (pydantic_core, jiter), so fetch Linux
+# wheels matching the Lambda runtime instead of the build machine's platform.
+# Set LAMBDA_ARCH=aarch64 if the function runs on arm64.
+LAMBDA_ARCH="${LAMBDA_ARCH:-x86_64}"
+LAMBDA_PYTHON="${LAMBDA_PYTHON:-3.14}"
+pip3 install -r <(grep -viE '^(boto3|botocore)([<>=!~ ]|$)' requirements.txt) -t package/ \
+    --platform "manylinux2014_${LAMBDA_ARCH}" \
+    --implementation cp \
+    --python-version "${LAMBDA_PYTHON}" \
+    --only-binary=:all:
 
-# Strip bytecode caches and dist metadata to slim the package further
+# Strip bytecode caches to slim the package further. Keep *.dist-info: some
+# deps (e.g. httpx2, used by anthropic) read their own package metadata at
+# import time and fail with "No package metadata was found" without it.
 find package -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null
-find package -type d -name '*.dist-info' -exec rm -rf {} + 2>/dev/null
-find package -type d -name '*.egg-info' -exec rm -rf {} + 2>/dev/null
 
 # Copy Lambda function to package
 cp lambda_function.py package/
