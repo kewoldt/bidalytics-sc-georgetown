@@ -21,6 +21,6 @@ fi
 scan_dir=$(mktemp -d)
 trap 'rm -rf "$scan_dir"' EXIT
 
-.venv/bin/pip freeze --exclude-editable > "$scan_dir/requirements.txt"
+.venv/bin/pip freeze --exclude-editable > "$scan_dir/requirements.txt" || exit 1
 
 trivy fs --scanners vuln --dependency-tree "$@" "$scan_dir"
