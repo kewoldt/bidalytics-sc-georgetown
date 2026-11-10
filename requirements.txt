@@ -3,4 +3,9 @@ boto3>=1.37.0
 botocore>=1.37.0
 requests>=2.32.0
 beautifulsoup4>=4.12.0
-pymongo>=4.9.0
+pymongo>=4.18.3
+
+# Transitive deps pinned to minimum security-fixed versions (see ./run_trivy.sh)
+certifi>=2026.10.18  # via requests
+urllib3>=2.8.0       # via requests
+dnspython>=2.9.0     # via pymongo
